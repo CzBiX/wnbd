@@ -26,7 +26,7 @@ WnbdGetBlockCount(_In_ UINT64 DiskSize, UINT16 BlockSize)
     return (DiskSize >> WnbdGetShiftBlockSize(BlockSize));
 }
 
-UCHAR
+NTSTATUS
 WnbdReadCapacity(_In_ PSCSI_DEVICE_INFORMATION Info,
                  _In_ PSCSI_REQUEST_BLOCK Srb,
                  _In_ PCDB Cdb,
@@ -40,7 +40,9 @@ WnbdReadCapacity(_In_ PSCSI_DEVICE_INFORMATION Info,
 
     PVOID DataBuffer = SrbGetDataBuffer(Srb);
     ULONG DataTransferLength = SrbGetDataTransferLength(Srb);
-    UCHAR SrbStatus = SRB_STATUS_DATA_OVERRUN;
+    NTSTATUS status = STATUS_INVALID_PARAMETER;
+
+    WNBD_LOG_INFO("Data transfer length: %lu", DataTransferLength);
 
     if (0 == DataBuffer) {
         goto Exit;
@@ -53,18 +55,26 @@ WnbdReadCapacity(_In_ PSCSI_DEVICE_INFORMATION Info,
     case SCSIOP_READ_CAPACITY:
         {
         if (sizeof(READ_CAPACITY_DATA) > DataTransferLength) {
+            Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
+            status = STATUS_BUFFER_TOO_SMALL;
             goto Exit;
         }
         PREAD_CAPACITY_DATA ReadCapacityData = DataBuffer;
-        REVERSE_BYTES_4(&ReadCapacityData->LogicalBlockAddress, &BlockCount);
+
+        ULONG tmp = BlockCount > MAXULONG ? MAXULONG : (ULONG)BlockCount;
+        REVERSE_BYTES_4(&ReadCapacityData->LogicalBlockAddress, &tmp);
+
         REVERSE_BYTES_4(&ReadCapacityData->BytesPerBlock, &BlockSize);
         SrbSetDataTransferLength(Srb, sizeof(READ_CAPACITY_DATA));
-        SrbStatus = SRB_STATUS_SUCCESS;
+        Srb->SrbStatus = SRB_STATUS_SUCCESS;
         }
         break;
     case SCSIOP_READ_CAPACITY16:
         {
         if (sizeof(READ_CAPACITY16_DATA) > DataTransferLength) {
+            WNBD_LOG_INFO("Small transfer length: %llu", sizeof(READ_CAPACITY16_DATA));
+            Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
+            status = STATUS_BUFFER_TOO_SMALL;
             goto Exit;
         }
         PREAD_CAPACITY16_DATA ReadCapacityData16 = DataBuffer;
@@ -74,7 +84,7 @@ WnbdReadCapacity(_In_ PSCSI_DEVICE_INFORMATION Info,
             ReadCapacityData16->LBPME = 1;
         }
         SrbSetDataTransferLength(Srb, sizeof(READ_CAPACITY16_DATA));
-        SrbStatus = SRB_STATUS_SUCCESS;
+        Srb->SrbStatus = SRB_STATUS_SUCCESS;
         }
         break;
     default:
@@ -85,7 +95,7 @@ WnbdReadCapacity(_In_ PSCSI_DEVICE_INFORMATION Info,
 Exit:
     WNBD_LOG_LOUD(": Exit");
 
-    return SrbStatus;
+    return status;
 }
 
 UCHAR
@@ -672,7 +682,7 @@ WnbdHandleSrbOperation(PVOID DeviceExtension,
     case SCSIOP_READ_CAPACITY:
     case SCSIOP_READ_CAPACITY16:
         WNBD_LOG_INFO("Using BlockSize: %u", BlockSize);
-        Srb->SrbStatus = WnbdReadCapacity(Info, Srb, Cdb, BlockSize, BlockCount);
+        status = WnbdReadCapacity(Info, Srb, Cdb, BlockSize, BlockCount);
         break;
 
     case SCSIOP_VERIFY:
